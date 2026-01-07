@@ -3,12 +3,18 @@
 
 // @author: htcdevk0
 
+//
+// Last patch [1.1.0]:
+// Added std::vector support
+//
+
 #include <string>
 #include <memory>
 #include <functional>
 #include <stdexcept>
 #include <iostream>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -18,10 +24,26 @@
 #define STDDLL_POSIX
 #endif
 
-#define STDDLL_VERSION "1.0.0"
+#define STDDLL_VERSION "1.1.0"
 
 namespace stddll
 {
+
+    namespace detail
+    {
+        template <typename T>
+        struct is_std_vector : std::false_type
+        {
+        };
+
+        template <typename T, typename A>
+        struct is_std_vector<std::vector<T, A>> : std::true_type
+        {
+        };
+    }
+
+    template <typename T>
+    constexpr bool is_std_vector = detail::is_std_vector<T>::value;
 
 #ifdef STDDLL_WIN
 #define DLL_EXPORT __declspec(dllexport)
@@ -32,6 +54,28 @@ namespace stddll
 #endif
 
 #define EXPORT extern "C" DLL_EXPORT
+
+#define EXPORT_VECTOR(type, name, size, ...) \
+    EXPORT type name[size] = {__VA_ARGS__}; \
+    EXPORT size_t name##_size = (size)
+
+#define EXPORT_DYNAMIC_VECTOR(type, name) \
+    EXPORT type *name = nullptr;          \
+    EXPORT size_t name##_size = 0;        \
+    EXPORT void name##_init(size_t n)     \
+    {                                     \
+        if (name)                         \
+            delete[] name;                \
+        name = new type[n];               \
+        name##_size = n;                  \
+    }                                     \
+    EXPORT void name##_free()             \
+    {                                     \
+        if (name)                         \
+            delete[] name;                \
+        name = nullptr;                   \
+        name##_size = 0;                  \
+    }
 
 #define EXPORT_CLASS(T)                                       \
     extern "C" DLL_EXPORT T *create_##T() { return new T(); } \
@@ -105,7 +149,6 @@ namespace stddll
         {
             if (!handle)
             {
-
                 if constexpr (std::is_function_v<T>)
                 {
                     using FuncPtr = T *;
@@ -147,17 +190,35 @@ namespace stddll
                 }
             }
 
-            if constexpr (std::is_function_v<T>)
+            if constexpr (is_std_vector<T>)
+            {
+                using ValueType = typename T::value_type;
+                ValueType *data_ptr = reinterpret_cast<ValueType *>(ptr);
+                size_t size = 0;
+
+                void *size_ptr = nullptr;
+#ifdef STDDLL_WIN
+                size_ptr = reinterpret_cast<void *>(GetProcAddress(handle, (name + "_size").c_str()));
+#else
+                size_ptr = dlsym(handle, (name + "_size").c_str());
+#endif
+
+                if (size_ptr)
+                {
+                    size = *reinterpret_cast<size_t *>(size_ptr);
+                }
+
+                return T(data_ptr, data_ptr + size);
+            }
+            else if constexpr (std::is_function_v<T>)
             {
                 using FuncPtr = T *;
                 return reinterpret_cast<FuncPtr>(ptr);
             }
-
             else if constexpr (std::is_pointer_v<T>)
             {
                 return reinterpret_cast<T>(ptr);
             }
-
             else
             {
                 return *reinterpret_cast<T *>(ptr);
@@ -229,10 +290,8 @@ namespace stddll
 }
 
 #define EASY_DLL(var_name, dll_path) auto var_name = stddll::load(dll_path)
-
 #define GET_FUNC(dll, return_type, func_name, ...) \
     dll.get<return_type (*)(__VA_ARGS__)>(#func_name)
-
 #define CALL(dll, func, ...) \
     dll.get<decltype(func) *>(#func)(__VA_ARGS__)
 
