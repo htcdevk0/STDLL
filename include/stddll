@@ -37,53 +37,31 @@ namespace stddll
     extern "C" DLL_EXPORT T *create_##T() { return new T(); } \
     extern "C" DLL_EXPORT void destroy_##T(T *obj) { delete obj; }
 
-class DLL
-{
-private:
-#ifdef STDDLL_WIN
-    HMODULE handle = nullptr;
-#else
-    void *handle = nullptr;
-#endif
-    std::string path;
-
-public:
-    explicit DLL(const std::string &dll_path) : path(dll_path)
+    class DLL
     {
+    private:
 #ifdef STDDLL_WIN
-        handle = LoadLibraryA(dll_path.c_str());
-        if (!handle)
-            throw std::runtime_error("Failed to load: " + dll_path);
+        HMODULE handle = nullptr;
 #else
-        handle = dlopen(dll_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
-        if (!handle)
-            throw std::runtime_error(dlerror());
+        void *handle = nullptr;
 #endif
-    }
+        std::string path;
 
-    ~DLL() noexcept
-    {
-        if (handle)
+    public:
+        explicit DLL(const std::string &dll_path) : path(dll_path)
         {
 #ifdef STDDLL_WIN
-            FreeLibrary(handle);
+            handle = LoadLibraryA(dll_path.c_str());
+            if (!handle)
+                throw std::runtime_error("Failed to load: " + dll_path);
 #else
-            dlclose(handle);
+            handle = dlopen(dll_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+            if (!handle)
+                throw std::runtime_error(dlerror());
 #endif
         }
-    }
 
-    DLL(const DLL &) = delete;
-    DLL &operator=(const DLL &) = delete;
-
-    DLL(DLL &&other) noexcept : handle(other.handle), path(std::move(other.path))
-    {
-        other.handle = nullptr;
-    }
-
-    DLL &operator=(DLL &&other) noexcept
-    {
-        if (this != &other)
+        ~DLL() noexcept
         {
             if (handle)
             {
@@ -93,98 +71,162 @@ public:
                 dlclose(handle);
 #endif
             }
-            handle = other.handle;
-            path = std::move(other.path);
+        }
+
+        DLL(const DLL &) = delete;
+        DLL &operator=(const DLL &) = delete;
+
+        DLL(DLL &&other) noexcept : handle(other.handle), path(std::move(other.path))
+        {
             other.handle = nullptr;
         }
-        return *this;
-    }
 
-    template <typename Func>
-    Func *get(const std::string &function_name) const
-    {
-        if (!handle)
-            return nullptr;
-
-#ifdef STDDLL_WIN
-        void *func = reinterpret_cast<void *>(
-            GetProcAddress(handle, function_name.c_str()));
-#else
-        void *func = dlsym(handle, function_name.c_str());
-#endif
-
-        if (!func)
+        DLL &operator=(DLL &&other) noexcept
         {
-            std::cerr << "Symbol '" << function_name << "' not found in " << path << std::endl;
-            return nullptr;
+            if (this != &other)
+            {
+                if (handle)
+                {
+#ifdef STDDLL_WIN
+                    FreeLibrary(handle);
+#else
+                    dlclose(handle);
+#endif
+                }
+                handle = other.handle;
+                path = std::move(other.path);
+                other.handle = nullptr;
+            }
+            return *this;
         }
 
-        return reinterpret_cast<Func *>(func);
-    }
+        template <typename T>
+        auto get(const std::string &name) const
+        {
+            if (!handle)
+            {
 
-    template <typename Func>
-    Func *operator()(const std::string &function_name) const
+                if constexpr (std::is_function_v<T>)
+                {
+                    using FuncPtr = T *;
+                    return static_cast<FuncPtr>(nullptr);
+                }
+                else if constexpr (std::is_pointer_v<T>)
+                {
+                    return static_cast<T>(nullptr);
+                }
+                else
+                {
+                    return T{};
+                }
+            }
+
+#ifdef STDDLL_WIN
+            void *ptr = reinterpret_cast<void *>(
+                GetProcAddress(handle, name.c_str()));
+#else
+            void *ptr = dlsym(handle, name.c_str());
+#endif
+
+            if (!ptr)
+            {
+                std::cerr << "Symbol '" << name << "' not found in " << path << std::endl;
+
+                if constexpr (std::is_function_v<T>)
+                {
+                    using FuncPtr = T *;
+                    return static_cast<FuncPtr>(nullptr);
+                }
+                else if constexpr (std::is_pointer_v<T>)
+                {
+                    return static_cast<T>(nullptr);
+                }
+                else
+                {
+                    return T{};
+                }
+            }
+
+            if constexpr (std::is_function_v<T>)
+            {
+                using FuncPtr = T *;
+                return reinterpret_cast<FuncPtr>(ptr);
+            }
+
+            else if constexpr (std::is_pointer_v<T>)
+            {
+                return reinterpret_cast<T>(ptr);
+            }
+
+            else
+            {
+                return *reinterpret_cast<T *>(ptr);
+            }
+        }
+
+        template <typename Func>
+        Func *operator()(const std::string &function_name) const
+        {
+            return get<Func>(function_name);
+        }
+
+        operator bool() const { return handle != nullptr; }
+
+        const std::string &name() const { return path; }
+    };
+
+    inline DLL load(const std::string &dll_path)
     {
-        return get<Func>(function_name);
+        return DLL(dll_path);
     }
 
-    operator bool() const { return handle != nullptr; }
+    class DLLManager
+    {
+    private:
+        std::unordered_map<std::string, DLL> dlls;
 
-    const std::string &name() const { return path; }
-};
+    public:
+        DLL &load(const std::string &name, const std::string &path)
+        {
+            return dlls.emplace(name, DLL(path)).first->second;
+        }
 
-inline DLL load(const std::string &dll_path)
-{
-    return DLL(dll_path);
+        DLL &get(const std::string &name)
+        {
+            auto it = dlls.find(name);
+            if (it == dlls.end())
+                throw std::runtime_error("DLL not loaded: " + name);
+            return it->second;
+        }
+
+        void unload(const std::string &name)
+        {
+            dlls.erase(name);
+        }
+
+        bool has(const std::string &name) const
+        {
+            return dlls.find(name) != dlls.end();
+        }
+
+        void clear()
+        {
+            dlls.clear();
+        }
+    };
+
+    inline DLLManager &dlls()
+    {
+        static DLLManager manager;
+        return manager;
+    }
+
+    inline DLL &load_to(const std::string &name, const std::string &path)
+    {
+        return dlls().load(name, path);
+    }
+
 }
-
-class DLLManager
-{
-private:
-    std::unordered_map<std::string, DLL> dlls;
-
-public:
-    DLL &load(const std::string &name, const std::string &path)
-    {
-        return dlls.emplace(name, DLL(path)).first->second;
-    }
-
-    DLL &get(const std::string &name)
-    {
-        auto it = dlls.find(name);
-        if (it == dlls.end())
-            throw std::runtime_error("DLL not loaded: " + name);
-        return it->second;
-    }
-
-    void unload(const std::string &name)
-    {
-        dlls.erase(name);
-    }
-
-    bool has(const std::string &name) const
-    {
-        return dlls.find(name) != dlls.end();
-    }
-
-    void clear()
-    {
-        dlls.clear();
-    }
-};
-
-inline DLLManager &dlls()
-{
-    static DLLManager manager;
-    return manager;
-}
-
-inline DLL &load_to(const std::string &name, const std::string &path)
-{
-    return dlls().load(name, path);
-}
-
-} 
 
 #define EASY_DLL(var_name, dll_path) auto var_name = stddll::load(dll_path)
 
